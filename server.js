@@ -3,9 +3,9 @@ const bodyParser = require("body-parser")
 const fs = require("fs")
 const path = require("path")
 
-const { inicio } = require("./inicio")
-const { menu } = require("./menu")
-const { medicamentos } = require("./medicamentos")
+const { inicio } = require("./flows/inicio")
+const { menu } = require("./flows/menu")
+const { medicamentos } = require("./flows/medicamentos")
 
 const app = express()
 app.use(bodyParser.json())
