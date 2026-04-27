@@ -1,165 +1,206 @@
-const express = require("express")
-const bodyParser = require("body-parser")
-const fs = require("fs")
-const path = require("path")
+const express = require('express');
+const bodyParser = require('body-parser');
+const axios = require('axios');
+const fs = require('fs-extra');
+const path = require('path');
 
-const { inicio } = require("./flows/inicio")
-const { menu } = require("./flows/menu")
-const { medicamentos } = require("./flows/medicamentos")
+const app = express();
+app.use(bodyParser.json());
 
-const app = express()
-app.use(bodyParser.json())
+// =======================================
+// CONFIGURAÇÕES (AJUSTADAS PARA O SEU RENDER)
+// =======================================
+const PORT = process.env.PORT || 3000; 
+const API_URL = 'https://evolution-api-nhnm.onrender.com'; 
+const API_KEY = 'farmacia123'; 
+const INSTANCE = 'Teste_Sucesso_0'; 
 
-// ============================
-// ARQUIVO DE SESSÕES
-// ============================
+const estadoFile = path.join(__dirname, 'estadoUsuarios.json');
+const logFile = path.join(__dirname, 'mensagens.log');
 
-const caminho = path.join(__dirname, "storage", "sessions.json")
+let estadoUsuarios = {};
+let timersInatividade = {};
 
-// garante pasta e arquivo
-if(!fs.existsSync(path.join(__dirname,"storage"))){
- fs.mkdirSync(path.join(__dirname,"storage"))
+// Carregar estado salvo
+if (fs.existsSync(estadoFile)) {
+    try {
+        estadoUsuarios = JSON.parse(fs.readFileSync(estadoFile, 'utf8'));
+    } catch (e) {
+        estadoUsuarios = {};
+    }
 }
 
-if(!fs.existsSync(caminho)){
- fs.writeFileSync(caminho,"{}")
+function salvarEstado() {
+    fs.writeFileSync(estadoFile, JSON.stringify(estadoUsuarios, null, 2));
 }
 
-// ============================
-// LIMPAR SESSÕES ANTIGAS
-// ============================
-
-function limparSessoesAntigas(){
-
- try{
-
-  const sessoes = JSON.parse(fs.readFileSync(caminho))
-  const agora = Date.now()
-
-  for(const numero in sessoes){
-
-   const ultima = sessoes[numero].ultimaInteracao || 0
-
-   if(agora - ultima > 60 * 60 * 1000){
-    delete sessoes[numero]
-   }
-
-  }
-
-  fs.writeFileSync(caminho, JSON.stringify(sessoes,null,2))
-
- }catch(err){
-
-  console.log("Erro limpando sessões:", err.message)
-
- }
-
+function logMensagem(msg) {
+    const linha = `[${new Date().toLocaleString()}] ${msg}\n`;
+    fs.appendFileSync(logFile, linha);
+    console.log(msg);
 }
 
-setInterval(limparSessoesAntigas, 10 * 60 * 1000)
+// =======================================
+// FUNÇÕES AUXILIARES
+// =======================================
+function estaAberto() {
+    const agora = new Date();
+    const dia = agora.getDay();
+    const hora = agora.getHours();
 
+    // Sábado (6) e Domingo (0) fechado
+    if (dia === 0 || dia === 6) return false;
 
-// ============================
-// ROTA TESTE
-// ============================
+    // Horário: 08:00-12:00 e 13:00-17:00
+    return (hora >= 8 && hora < 12) || (hora >= 13 && hora < 17);
+}
 
-app.get("/", (req,res)=>{
- res.send("BOT FARMACIA ONLINE")
-})
+async function enviarMensagem(numero, texto) {
+    try {
+        await axios.post(`${API_URL}/message/sendText/${INSTANCE}`, {
+            number: numero.split('@')[0], // Limpa o JID para enviar apenas números
+            text: texto
+        }, {
+            headers: { apikey: API_KEY }
+        });
+    } catch (e) {
+        logMensagem(`Erro ao enviar para ${numero}: ${e.message}`);
+    }
+}
 
+async function enviarMenuPrincipal(from) {
+    const menu = `Escolha uma opção:
 
-// ============================
-// WEBHOOK WHATSAPP
-// ============================
+1️⃣ Falar com atendente
+2️⃣ Medicação do Governo RS
+3️⃣ Farmacêutico
 
-app.post("/webhook", async (req,res)=>{
+🔙 Digite *voltar* para retornar ao menu`;
 
- try{
+    await enviarMensagem(from, menu);
+    estadoUsuarios[from].etapa = 'menu';
+    salvarEstado();
+}
 
-  const data = req.body
+function resetTimerInatividade(from) {
+    if (timersInatividade[from]) {
+        clearTimeout(timersInatividade[from].aviso);
+        clearTimeout(timersInatividade[from].expiracao);
+    }
 
-  if(!data?.messages) return res.sendStatus(200)
+    timersInatividade[from] = {};
 
-  const msg = data.messages[0]
+    timersInatividade[from].aviso = setTimeout(async () => {
+        await enviarMensagem(from, '⏰ Sua sessão expirará em 5 minutos.');
+    }, 55 * 60 * 1000);
 
-  if(!msg?.key?.remoteJid) return res.sendStatus(200)
+    timersInatividade[from].expiracao = setTimeout(async () => {
+        await enviarMensagem(from, '⏰ Sessão encerrada por inatividade.');
+        delete estadoUsuarios[from];
+        salvarEstado();
+    }, 60 * 60 * 1000);
+}
 
-  // ignora mensagens enviadas pelo bot
-  if(msg.key.fromMe) return res.sendStatus(200)
+// =======================================
+// WEBHOOK (ENTRADA DE MENSAGENS)
+// =======================================
+app.post('/webhook', async (req, res) => {
+    try {
+        const data = req.body;
 
-  // ignora eventos sem mensagem
-  if(!msg.message) return res.sendStatus(200)
+        // Verifica se é uma mensagem vindo da Evolution API
+        if (!data.data || !data.data.key) return res.sendStatus(200);
 
-  // bloquear mídias
-  if(
-   msg.message.imageMessage ||
-   msg.message.audioMessage ||
-   msg.message.videoMessage ||
-   msg.message.documentMessage ||
-   msg.message.stickerMessage
-  ){
-   return res.sendStatus(200)
-  }
+        const from = data.data.key.remoteJid;
+        const pushName = data.data.pushName || 'Cliente';
+        
+        // Extrai o texto da mensagem
+        const texto = data.data.message?.conversation || 
+                      data.data.message?.extendedTextMessage?.text || 
+                      '';
 
-  // =========================
-  // EXTRAIR TEXTO
-  // =========================
+        const textoFormatado = texto.trim().toLowerCase();
 
-  let texto = ""
+        logMensagem(`📩 ${from} (${pushName}): ${texto}`);
 
-  if(msg.message.conversation){
-   texto = msg.message.conversation
-  }
-  else if(msg.message.extendedTextMessage?.text){
-   texto = msg.message.extendedTextMessage.text
-  }
-  else{
-   return res.sendStatus(200)
-  }
+        // Ignorar mensagens enviadas pelo próprio bot (evita loop)
+        if (data.data.key.fromMe) return res.sendStatus(200);
 
-  const numero = msg.key.remoteJid
-  const mensagem = texto.trim().toLowerCase()
+        // Criar estado para o usuário
+        if (!estadoUsuarios[from]) {
+            estadoUsuarios[from] = { etapa: 'inicio', nome: null };
+        }
 
-  console.log("Mensagem recebida:", numero, mensagem)
+        // BLOQUEIO SE ESTIVER COM HUMANO
+        if (estadoUsuarios[from].etapa === 'atendimento_humano' && textoFormatado !== 'voltar') {
+            return res.sendStatus(200);
+        }
 
-  // =========================
-  // FLUXO BOT
-  // =========================
+        resetTimerInatividade(from);
 
-  if(await inicio(numero,mensagem)) return res.sendStatus(200)
+        // Verificação de Horário
+        if (!estaAberto()) {
+            await enviarMensagem(from, '⏰ Atendimento encerrado.\nHorário: 08:00-12:00 e 13:00-17:00.\nDeixe sua mensagem que responderemos em breve.');
+            return res.sendStatus(200);
+        }
 
-  if(mensagem === "menu" || mensagem === "oi"){
+        // Comando VOLTAR
+        if (textoFormatado === 'voltar') {
+            await enviarMenuPrincipal(from);
+            return res.sendStatus(200);
+        }
 
-   await menu(numero)
-   return res.sendStatus(200)
+        // Fluxo de Captura de NOME
+        if (!estadoUsuarios[from].nome) {
+            if (estadoUsuarios[from].etapa !== 'aguardando_nome') {
+                await enviarMensagem(from, `👋 Olá! Bem-vindo à Farmácia Catuípe.\nPor favor, digite seu *NOME* para começarmos:`);
+                estadoUsuarios[from].etapa = 'aguardando_nome';
+            } else {
+                estadoUsuarios[from].nome = texto;
+                await enviarMensagem(from, `Prazer, ${estadoUsuarios[from].nome}! Como podemos ajudar?`);
+                await enviarMenuPrincipal(from);
+            }
+            salvarEstado();
+            return res.sendStatus(200);
+        }
 
-  }
+        // Fluxo do MENU PRINCIPAL
+        if (estadoUsuarios[from].etapa === 'menu') {
+            if (textoFormatado === '1') {
+                await enviarMensagem(from, 'Selecione o atendente:\n1️⃣ Fernanda\n2️⃣ Isadora\n3️⃣ Vanessa');
+                estadoUsuarios[from].etapa = 'atendente';
+            } else if (textoFormatado === '2' || textoFormatado === '3') {
+                await enviarMensagem(from, 'Aguarde um momento, em breve um de nossos profissionais irá lhe atender.');
+                estadoUsuarios[from].etapa = 'atendimento_humano';
+            } else {
+                await enviarMensagem(from, 'Opção inválida. Escolha 1, 2 ou 3.');
+            }
+            salvarEstado();
+            return res.sendStatus(200);
+        }
 
-  if(mensagem === "4"){
+        // Fluxo de Seleção de ATENDENTE
+        if (estadoUsuarios[from].etapa === 'atendente') {
+            if (['1', '2', '3'].includes(textoFormatado)) {
+                await enviarMensagem(from, 'Aguarde, o atendente selecionado já foi notificado e falará com você em instantes.');
+                estadoUsuarios[from].etapa = 'atendimento_humano';
+            } else {
+                await enviarMensagem(from, 'Escolha 1, 2 ou 3 ou digite *voltar*.');
+            }
+            salvarEstado();
+            return res.sendStatus(200);
+        }
 
-   await medicamentos(numero)
-   return res.sendStatus(200)
+        res.sendStatus(200);
+    } catch (err) {
+        logMensagem(`❌ Erro no Processamento: ${err.message}`);
+        res.sendStatus(500);
+    }
+});
 
-  }
-
-  return res.sendStatus(200)
-
- }catch(err){
-
-  console.log("Erro webhook:", err.message)
-  return res.sendStatus(200)
-
- }
-
-})
-
-
-// ============================
-// START SERVER
-// ============================
-
-const PORT = process.env.PORT || 3000
-
-app.listen(PORT, ()=>{
- console.log("Servidor rodando porta", PORT)
-})
+// =======================================
+// INICIALIZAÇÃO
+// =======================================
+app.listen(PORT, () => {
+    console.log(`🚀 Bot da Farmácia rodando na porta ${PORT}`);
+});
