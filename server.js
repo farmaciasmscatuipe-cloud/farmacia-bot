@@ -201,6 +201,16 @@ app.post('/webhook', async (req, res) => {
 // =======================================
 // INICIALIZAÇÃO
 // =======================================
+app.get('/', (req, res) => {
+  res.send('Bot da Farmácia Catuípe está online! 🚀');
+});
 app.listen(PORT, () => {
     console.log(`🚀 Bot da Farmácia rodando na porta ${PORT}`);
 });
+
+// Sistema de Auto-Despertar (Ignora o bloqueio do Cron-job externo)
+setInterval(() => {
+  axios.get('https://farmacia-bot-1.onrender.com')
+    .then(() => console.log("⏰ Auto-ping interno: Sistema operando."))
+    .catch((e) => console.log("⏰ Auto-ping: Reiniciando motor..."));
+}, 600000); // 600.000ms = 10 minutos
