@@ -208,9 +208,15 @@ app.listen(PORT, () => {
     console.log(`🚀 Bot da Farmácia rodando na porta ${PORT}`);
 });
 
-// Sistema de Auto-Despertar (Ignora o bloqueio do Cron-job externo)
+// Rota raiz para o ping não dar erro 404
+app.get('/', (req, res) => {
+  res.send('Bot Online 🚀');
+});
+
+// Sistema de Auto-Despertar interno
 setInterval(() => {
-  axios.get('https://farmacia-bot-1.onrender.com')
-    .then(() => console.log("⏰ Auto-ping interno: Sistema operando."))
-    .catch((e) => console.log("⏰ Auto-ping: Reiniciando motor..."));
-}, 600000); // 600.000ms = 10 minutos
+  const url = `https://farmacia-bot-1.onrender.com`;
+  axios.get(url)
+    .then(() => console.log("⏰ Auto-ping: Mantendo o sistema ativo."))
+    .catch((e) => console.log("⏰ Auto-ping: O motor acordou!"));
+}, 840000); // 14 minutos (Intervalo ideal para o Render)
